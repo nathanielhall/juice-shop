@@ -122,12 +122,19 @@ jobs:
           cm report --format md > codemender_reports/summary.md
           cm report --format html > codemender_reports/dashboard.html
 
-          # EXCLUDE TEMPORARY FILES FROM GIT
-          echo "🧹 Excluding temporary files from Git..."
-          echo "cm-linux-amd64.zip" >> .git/info/exclude
-          echo "cm" >> .git/info/exclude
-          echo ".cm_project" >> .git/info/exclude
-          echo "gha-creds-*.json" >> .git/info/exclude
+          # 6. CLEANUP & EXCLUSION (Crucial for Security!)
+          echo "🧹 Cleaning up sensitive and temporary files..."
+          
+          # Hard-delete the files we never want to exist in the PR
+          rm -f cm-linux-amd64.zip
+          rm -f cm
+          rm -rf .cm_project
+          rm -rf .exploit/
+          rm -f gha-creds-*.json
+          
+          # We need to keep codemender_reports on disk so the next GitHub steps 
+          # can read the files for the PR body, but we MUST hide it from Git 
+          # so it doesn't get committed!
           echo "codemender_reports/" >> .git/info/exclude
           
           echo "✅ Remediation pipeline completed successfully!"
