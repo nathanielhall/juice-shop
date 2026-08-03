@@ -94,12 +94,24 @@ jobs:
           echo "⚠️ Found $FINDINGS_COUNT open CRITICAL findings. Starting remediation..."
           echo "NO_FINDINGS=false" >> "$GITHUB_ENV"
 
-          # Fix Phase (High-Reasoning Model)
-          FINDING_IDS=$(echo "$CRITICAL_FINDINGS" | jq -r '.[].id')
+
+          # Fix Phase: Extract the correct JSON key 'FindingID' (or 'id' as a fallback)
+          FINDING_IDS=$(echo "$CRITICAL_FINDINGS" | jq -r '.[] | .FindingID // .id')
 
           for FINDING_ID in $FINDING_IDS; do
+            # Skip if jq returned null for some reason
+            if [ "$FINDING_ID" == "null" ] || [ -z "$FINDING_ID" ]; then
+              continue
+            fi
+            
+            echo "--------------------------------------------------"
+            echo "🧪 Verifying finding: $FINDING_ID using Gemini 3.1 Pro..."
+            # Generate the PoC exploit (we use || true so if it fails to verify, it continues to the next loop)
+            cm verify "$FINDING_ID" --model gemini-3.1-pro-preview -y || echo "Verification skipped or failed."
+            
             echo "🩹 Remediating finding: $FINDING_ID using Gemini 3.1 Pro..."
-            cm fix "$FINDING_ID" --model gemini-3.1-pro-preview -y
+            # Generate the patch and validate it against the PoC
+            cm fix "$FINDING_ID" --model gemini-3.1-pro-preview -y || echo "Fix skipped or failed."
           done
 
           # Export Reports
