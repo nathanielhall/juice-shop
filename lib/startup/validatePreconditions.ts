@@ -106,7 +106,6 @@ const validatePreconditions = async ({ exitOnFailure = true } = {}) => {
 
   if ((!success || !asyncConditions) && exitOnFailure) {
     logger.error(colors.red('Exiting due to unsatisfied precondition!'))
-    
   }
   return success
 }
