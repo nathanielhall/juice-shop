@@ -140,6 +140,13 @@ jobs:
           delete-branch: true
           title: "🔒 Nightly Security Patch: Automated CodeMender Remediation"
           body-path: codemender_reports/summary.md
+          add-paths: |
+            *
+            !cm-linux-amd64.zip
+            !cm
+            !.cm_project
+            !gha-creds-*.json
+            !codemender_reports/**
           labels: |
             security
             automerge
