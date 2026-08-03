@@ -11,7 +11,7 @@ const validateIfDependencyCheckerIsInstalled = async () => {
     await import('check-dependencies')
   } catch (err) {
     console.error('Please run "npm install" before starting the application!')
-    process.exit(1)
+    
   }
 }
 
