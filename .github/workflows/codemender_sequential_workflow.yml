@@ -119,6 +119,15 @@ jobs:
           mkdir -p codemender_reports
           cm report --format md > codemender_reports/summary.md
           cm report --format html > codemender_reports/dashboard.html
+
+          # EXCLUDE TEMPORARY FILES FROM GIT
+          echo "🧹 Excluding temporary files from Git..."
+          echo "cm-linux-amd64.zip" >> .git/info/exclude
+          echo "cm" >> .git/info/exclude
+          echo ".cm_project" >> .git/info/exclude
+          echo "gha-creds-*.json" >> .git/info/exclude
+          echo "codemender_reports/" >> .git/info/exclude
+          
           echo "✅ Remediation pipeline completed successfully!"
 
       # 5. Upload the Interactive Dashboard (Only if findings exist)
@@ -140,13 +149,6 @@ jobs:
           delete-branch: true
           title: "🔒 Nightly Security Patch: Automated CodeMender Remediation"
           body-path: codemender_reports/summary.md
-          add-paths: |
-            *
-            !cm-linux-amd64.zip
-            !cm
-            !.cm_project
-            !gha-creds-*.json
-            !codemender_reports/**
           labels: |
             security
             automerge
