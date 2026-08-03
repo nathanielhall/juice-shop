@@ -26,14 +26,26 @@ jobs:
           workload_identity_provider: '${{ secrets.WIF_PROVIDER }}'
           service_account: '${{ secrets.WIF_SERVICE_ACCOUNT }}'
 
+      # NEW STEP: Set up the gcloud CLI
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
       # 2. Download and Install CodeMender On-The-Fly
       - name: Install CodeMender CLI
         run: |
-          echo "Downloading CodeMender..."
-          curl -sS -o cm-linux.zip "https://storage.googleapis.com/codemender-public/cmoc/cmoc-linux-amd64.zip"
-          unzip -q cm-linux.zip
-          chmod +x cmoc-linux-amd64
-          sudo mv cmoc-linux-amd64 /usr/local/bin/cm
+          echo "Downloading CodeMender from Artifact Registry..."
+          gcloud artifacts generic download \
+            --project=cmoc-prod \
+            --location=us \
+            --repository=codemender-cli-production \
+            --package=cm \
+            --version=stable \
+            --name=cm-linux-amd64.zip \
+            --destination=./
+            
+          unzip -q cm-linux-amd64.zip
+          chmod +x cm
+          sudo mv cm /usr/local/bin/cm
           cm --version
 
       # 3. Configure Git Identity for the Bot
