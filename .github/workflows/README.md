@@ -38,6 +38,8 @@ Granted the `roles/iam.workloadIdentityUser` role to the pool, restricted explic
 
 *(Note: Once set up, the resulting **Provider String** and **Service Account Email** are generated for use in GitHub Secrets).*
 
+For reference, see [Setting Up Workload Identity Federation Between GitHub Actions and Google Cloud Platform](https://www.firefly.ai/academy/setting-up-workload-identity-federation-between-github-actions-and-google-cloud-platform)
+
 ---
 
 ## 3. GitHub Repository Configuration
@@ -45,9 +47,13 @@ Granted the `roles/iam.workloadIdentityUser` role to the pool, restricted explic
 For the workflow to execute successfully, the following repository-level settings were configured in GitHub:
 
 ### Secrets Configuration
-Located in **Settings > Secrets and variables > Actions**:
-* `WIF_PROVIDER`: The full path to the GCP Workload Identity Provider.
-* `WIF_SERVICE_ACCOUNT`: The email address of the GCP Service Account.
+The workflow requires two values from Google Cloud to authenticate. These must be stored in GitHub at **Settings > Secrets and variables > Actions**:
+
+* **`WIF_SERVICE_ACCOUNT`**: The email address of the GCP Service Account you created. 
+  * *Where to find it:* In the Google Cloud Console, navigate to **IAM & Admin > Service Accounts** and copy the email for the `codemender-ci-sa` account.
+* **`WIF_PROVIDER`**: The full resource name of your Workload Identity Provider. 
+  * *Where to find it:* In the Google Cloud Console, navigate to **IAM & Admin > Workload Identity Federation**. Click on your pool (`github-pool`), then click on your provider (`github-provider`). Copy the full string listed under **Default audience** or **Resource Name**. 
+  * *(Format: `projects/[YOUR_PROJECT_NUMBER]/locations/global/workloadIdentityPools/github-pool/providers/github-provider`)*
 
 ### Security & Permission Toggles
 * **Allow 3rd-Party Actions:** In **Settings > Actions > General**, *Allow all actions and reusable workflows* was enabled so the runner can utilize official Google auth and PR creation actions.
