@@ -1,6 +1,6 @@
 # CodeMender Remediation Pipeline
 
-This repository contains an automated security pipeline that leverages **GitHub Actions** and **Google CodeMender** to autonomously discover, verify, and patch vulnerabilities in our codebase. 
+This repository contains an automated security pipeline, `codemender_sequential_workflow.yml`, that leverages **GitHub Actions** and **Google CodeMender** to autonomously discover, verify, and patch vulnerabilities in our codebase. 
 
 Instead of merely alerting developers to security flaws, this pipeline acts as an autonomous security engineer. It runs on a nightly schedule, generates verified patches using Gemini models, and submits a consolidated Pull Request for human review.
 
