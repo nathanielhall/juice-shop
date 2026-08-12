@@ -1,0 +1,77 @@
+name: CodeMender Vulnerability Scan
+on:
+  # Trigger manually via the GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  codemender-scan:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write # Required for Workload Identity Federation
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. Authenticate to Google Cloud securely
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: '${{ secrets.WIF_PROVIDER }}'
+          service_account: '${{ secrets.WIF_SERVICE_ACCOUNT }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 2. Download and Install CodeMender On-The-Fly
+      - name: Install CodeMender CLI
+        run: |
+          echo "Downloading CodeMender from Artifact Registry..."
+          gcloud artifacts generic download \
+            --project=cmoc-prod \
+            --location=us \
+            --repository=codemender-cli-production \
+            --package=cm \
+            --version=stable \
+            --name=cm-linux-amd64.zip \
+            --destination=./
+            
+          unzip -q cm-linux-amd64.zip
+          chmod +x cm
+          sudo mv cm /usr/local/bin/cm
+          cm --version
+
+      # 3. Run the CodeMender Scan
+      - name: Run CodeMender Scan
+        run: |
+          set -e
+          echo "🚀 Initializing CodeMender Workspace..."
+          cm init
+
+          echo "🔍 Scanning codebase..."
+          # The -y flag auto-accepts prompts. 
+          # Token usage will be automatically printed to the console upon completion.
+          cm find . -y
+
+      # 4. Generate and Publish the Report
+      - name: Generate Security Report
+        run: |
+          echo "📊 Generating Markdown report..."
+          
+          # Generate the report in markdown format
+          cm report --format md > codemender_summary.md
+          
+          # Publish the report to the GitHub Actions Step Summary UI
+          echo "# CodeMender Scan Results" >> $GITHUB_STEP_SUMMARY
+          cat codemender_summary.md >> $GITHUB_STEP_SUMMARY
+
+      # 5. Cleanup Sensitive Binaries (Best Practice)
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f cm-linux-amd64.zip
+          rm -f cm
+          rm -rf ~/.codemender
+
