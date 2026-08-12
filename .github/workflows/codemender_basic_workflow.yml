@@ -51,20 +51,28 @@ jobs:
           cm init
 
           echo "🔍 Scanning codebase..."
-          # The -y flag auto-accepts prompts. 
-          # Token usage will be automatically printed to the console upon completion.
-          cm find . -y
+          # Run the scan and use 'tee' to save the console output to a log file 
+          # (capturing both stdout and stderr) while still displaying it in the GitHub Actions UI.
+          cm find . -y 2>&1 | tee scan_output.log
 
       # 4. Generate and Publish the Report
       - name: Generate Security Report
         run: |
           echo "📊 Generating Markdown report..."
-          
-          # Generate the report in markdown format
           cm report --format md > codemender_summary.md
           
-          # Publish the report to the GitHub Actions Step Summary UI
           echo "# CodeMender Scan Results" >> $GITHUB_STEP_SUMMARY
+          
+          # Extract the execution and token usage line from the scan log
+          TOKEN_SUMMARY=$(grep "Tokens:" scan_output.log | tail -n 1 || true)
+          
+          # If the token summary was found, inject it at the top of the GitHub Step Summary
+          if [ -n "$TOKEN_SUMMARY" ]; then
+            echo "### 🪙 Execution & Token Usage" >> $GITHUB_STEP_SUMMARY
+            echo "> $TOKEN_SUMMARY" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           cat codemender_summary.md >> $GITHUB_STEP_SUMMARY
 
       # 5. Cleanup Sensitive Binaries (Best Practice)
