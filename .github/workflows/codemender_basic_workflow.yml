@@ -5,15 +5,18 @@ on:
 
 jobs:
   codemender-scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     permissions:
-      contents: read
-      id-token: write # Required for Workload Identity Federation
+      contents: write
+      pull-requests: write
+      id-token: write
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # 1. Authenticate to Google Cloud securely
       - name: Authenticate to Google Cloud
@@ -43,7 +46,13 @@ jobs:
           sudo mv cm /usr/local/bin/cm
           cm --version
 
-      # 3. Run the CodeMender Scan
+      # 3. Configure Git Identity for the Bot
+      - name: Configure Git Identity
+        run: |
+          git config --global user.name "CodeMender Remediation Bot"
+          git config --global user.email "codemender-bot@google.com"
+
+      # 4. Run the CodeMender Scan
       - name: Run CodeMender Scan
         run: |
           set -e
@@ -55,7 +64,7 @@ jobs:
           # (capturing both stdout and stderr) while still displaying it in the GitHub Actions UI.
           cm find . --model gemini-3.5-flash -y | tee scan_output.log
 
-      # 4. Generate and Publish the Report
+      # 5. Generate and Publish the Report
       - name: Generate Security Report
         run: |
           echo "📊 Generating Markdown report..."
