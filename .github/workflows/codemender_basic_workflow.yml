@@ -53,7 +53,7 @@ jobs:
           echo "🔍 Scanning codebase..."
           # Run the scan and use 'tee' to save the console output to a log file 
           # (capturing both stdout and stderr) while still displaying it in the GitHub Actions UI.
-          cm find . -y 2>&1 | tee scan_output.log
+          cm find . --model gemini-3.5-flash -y | tee scan_output.log
 
       # 4. Generate and Publish the Report
       - name: Generate Security Report
