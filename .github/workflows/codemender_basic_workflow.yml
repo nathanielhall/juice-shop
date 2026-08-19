@@ -6,6 +6,11 @@ on:
 jobs:
   codemender-scan:
     runs-on: ubuntu-22.04
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
 
     steps:
       - name: Checkout Repository
