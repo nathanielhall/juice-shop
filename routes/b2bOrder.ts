@@ -20,6 +20,12 @@ export function b2bOrder () {
       try {
         const sandbox = { safeEval, orderLinesData }
         vm.createContext(sandbox)
+        
+        // Prevent sandbox escape via prototype climbing
+        if (typeof orderLinesData === 'string' && orderLinesData.match(/constructor|__proto__|process|exec/i)) {
+          throw new Error('Sandbox Escape Detected')
+        }
+        
         vm.runInContext('safeEval(orderLinesData)', sandbox, { timeout: 2000 })
         res.json({ cid: body.cid, orderNo: uniqueOrderNumber(), paymentDue: dateTwoWeeksFromNow() })
       } catch (err) {
