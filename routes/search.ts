@@ -72,3 +72,4 @@ export function searchProducts () {
   }
 }
 // vuln-code-snippet end unionSqlInjectionChallenge dbSchemaChallenge
+// CodeMender demo test touch: evaluating SQL injection and query vulnerabilities
