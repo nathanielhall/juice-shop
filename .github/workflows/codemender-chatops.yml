@@ -116,32 +116,31 @@ jobs:
             gcloud storage cp "${BRANCH_LATEST_PREFIX}/find-diff/output/findings.json" /tmp/findings.json
           fi
 
-          # 3. Extract the single finding matching FINDING_ID (by finding_id, id, ruleId, or 0-based index)
-          jq --arg fid "$FINDING_ID" '
-            .runs[0].results = (
-              [
-                .runs[0].results[]
-                | select(
-                    .properties.finding_id == $fid or
-                    .properties.id == $fid or
-                    .ruleId == $fid
-                  )
-              ]
-              | if length > 0 then .[0:1]
-                elif ($fid | tonumber? != null) then [ input_filename ] # handled below
-                else [] end
-            )
-          ' /tmp/findings.json > /tmp/single-finding.sarif || true
-
-          # Fallback: if FINDING_ID is a numeric index (e.g. 0, 1, 2)
-          MATCH_COUNT=$(jq '.runs[0].results | length' /tmp/single-finding.sarif 2>/dev/null || echo "0")
-          if [ "$MATCH_COUNT" -ne 1 ] && [[ "$FINDING_ID" =~ ^[0-9]+$ ]]; then
-            jq --argjson idx "$FINDING_ID" '.runs[0].results = [ .runs[0].results[$idx] | select(. != null) ]' \
-              /tmp/findings.json > /tmp/single-finding.sarif
+          # 3. Extract the single finding matching FINDING_ID (by 8-char ID in codemender_summary.md, properties, ruleId, or 0-based index)
+          RESOLVED_IDX=""
+          if [ -f ./codemender_summary.md ]; then
+            RESOLVED_IDX=$(grep -E '^\| `[0-9a-f]{8}` \|' ./codemender_summary.md | awk -F'`' -v fid="$FINDING_ID" '$2 == fid {print NR-1; exit}' || true)
           fi
 
-          FINAL_COUNT=$(jq '.runs[0].results | length' /tmp/single-finding.sarif)
-          if [ "$FINAL_COUNT" -ne 1 ]; then
+          jq --arg fid "$FINDING_ID" --arg ridx "$RESOLVED_IDX" '
+            (.runs[0].results // []) as $all |
+            .runs[0].results = (
+              [
+                $all | to_entries[] |
+                select(
+                  (.key | tostring) == $fid or
+                  (.key | tostring) == $ridx or
+                  .value.properties.finding_id == $fid or
+                  .value.properties.id == $fid or
+                  .value.ruleId == $fid
+                ) | .value
+              ][0:1]
+            )
+          ' /tmp/findings.json > /tmp/single-finding.sarif
+
+          FINAL_COUNT=$(jq -r '.runs[0].results | length' /tmp/single-finding.sarif 2>/dev/null || echo "0")
+          FINAL_COUNT="${FINAL_COUNT:-0}"
+          if [ ! -s /tmp/single-finding.sarif ] || [ "$FINAL_COUNT" != "1" ]; then
             echo "❌ Error: Could not isolate a single finding for ID '${FINDING_ID}' (found ${FINAL_COUNT})."
             exit 1
           fi
