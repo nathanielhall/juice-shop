@@ -1,0 +1,258 @@
+name: CodeMender ChatOps Agent (Cloud Run)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  PROJECT_ID: "codemender-nathanielhall"
+  REGION: "us-east4"
+  JOB_NAME: "codemender-runner"
+  TRANSIT_BUCKET: "gs://codemender-reports-codemender-nathanielhall"
+  BUILD_COMMAND: "true"
+
+jobs:
+  chatops-remediation:
+    # Trigger only if comment starts with /verify or /fix on an active Pull Request
+    if: >
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, '/verify ') || startsWith(github.event.comment.body, '/fix '))
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. Dynamically resolve the PR branch so CodeMender acts on the PR's code
+      - name: Resolve PR Branch details
+        id: pr-metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_INFO=$(gh pr view ${{ github.event.issue.number }} --json headRefName)
+          BRANCH=$(echo "$PR_INFO" | jq -r '.headRefName')
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Switch to PR Branch
+        run: |
+          git fetch origin "${{ steps.pr-metadata.outputs.branch }}"
+          git checkout "${{ steps.pr-metadata.outputs.branch }}"
+
+      # 2. Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: '${{ secrets.WIF_PROVIDER }}'
+          service_account: '${{ secrets.WIF_SERVICE_ACCOUNT }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 3. Configure Git Identity (for committing patches on /fix)
+      - name: Configure Git Identity
+        run: |
+          git config --global user.name "CodeMender ChatOps Bot"
+          git config --global user.email "codemender-bot@google.com"
+
+      # 4. Stage single-finding SARIF & manifest.json to GCS and trigger Cloud Run Job
+      - name: Stage ChatOps Inputs & Execute Cloud Run Job
+        id: execute-cmd
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          COMMAND=$(echo "$COMMENT_BODY" | awk '{print $1}')
+          FINDING_ID=$(echo "$COMMENT_BODY" | awk '{print $2}')
+
+          if [ "$COMMAND" == "/verify" ]; then
+            CMD_TYPE="verify"
+          elif [ "$COMMAND" == "/fix" ]; then
+            CMD_TYPE="fix"
+          else
+            echo "Unsupported command: $COMMAND"
+            exit 1
+          fi
+
+          BRANCH="${{ steps.pr-metadata.outputs.branch }}"
+          COMMIT_SHA=$(git rev-parse HEAD)
+
+          TARGET_GCS_PREFIX="${TRANSIT_BUCKET}/${GITHUB_REPOSITORY}/branches/${BRANCH}/${COMMIT_SHA}"
+          BRANCH_LATEST_PREFIX="${TRANSIT_BUCKET}/${GITHUB_REPOSITORY}/branches/${BRANCH}/latest"
+          TASK_PREFIX="${TARGET_GCS_PREFIX}/${CMD_TYPE}/${FINDING_ID}"
+          OUTPUT_URI="${TASK_PREFIX}/output"
+          MANIFEST_URI="${TASK_PREFIX}/manifest.json"
+          SINGLE_FINDING_URI="${TASK_PREFIX}/inputs/finding.sarif"
+
+          echo "cmd_type=${CMD_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "finding_id=${FINDING_ID}" >> "$GITHUB_OUTPUT"
+          echo "output_uri=${OUTPUT_URI}" >> "$GITHUB_OUTPUT"
+
+          # 1. Package current PR branch state and upload to GCS
+          tar -czf /tmp/code.tar.gz .
+          gcloud storage cp /tmp/code.tar.gz "${TARGET_GCS_PREFIX}/shared/code.tar.gz"
+
+          # 2. Download findings.json from commit path (or fallback to branch 'latest' path)
+          if ! gcloud storage cp "${TARGET_GCS_PREFIX}/find-diff/output/findings.json" /tmp/findings.json 2>/dev/null; then
+            echo "Commit-specific findings.json not found; falling back to branch latest..."
+            gcloud storage cp "${BRANCH_LATEST_PREFIX}/find-diff/output/findings.json" /tmp/findings.json
+          fi
+
+          # 3. Extract the single finding matching FINDING_ID (by finding_id, id, ruleId, or 0-based index)
+          jq --arg fid "$FINDING_ID" '
+            .runs[0].results = (
+              [
+                .runs[0].results[]
+                | select(
+                    .properties.finding_id == $fid or
+                    .properties.id == $fid or
+                    .ruleId == $fid
+                  )
+              ]
+              | if length > 0 then .[0:1]
+                elif ($fid | tonumber? != null) then [ input_filename ] # handled below
+                else [] end
+            )
+          ' /tmp/findings.json > /tmp/single-finding.sarif || true
+
+          # Fallback: if FINDING_ID is a numeric index (e.g. 0, 1, 2)
+          MATCH_COUNT=$(jq '.runs[0].results | length' /tmp/single-finding.sarif 2>/dev/null || echo "0")
+          if [ "$MATCH_COUNT" -ne 1 ] && [[ "$FINDING_ID" =~ ^[0-9]+$ ]]; then
+            jq --argjson idx "$FINDING_ID" '.runs[0].results = [ .runs[0].results[$idx] | select(. != null) ]' \
+              /tmp/findings.json > /tmp/single-finding.sarif
+          fi
+
+          FINAL_COUNT=$(jq '.runs[0].results | length' /tmp/single-finding.sarif)
+          if [ "$FINAL_COUNT" -ne 1 ]; then
+            echo "❌ Error: Could not isolate a single finding for ID '${FINDING_ID}' (found ${FINAL_COUNT})."
+            exit 1
+          fi
+
+          gcloud storage cp /tmp/single-finding.sarif "${SINGLE_FINDING_URI}"
+
+          # 4. Write and upload manifest.json
+          cat <<EOF > /tmp/manifest.json
+          {
+            "command": "${CMD_TYPE}",
+            "finding_id": "${FINDING_ID}",
+            "finding_uri": "${SINGLE_FINDING_URI}",
+            "payload_uri": "${TARGET_GCS_PREFIX}/shared/code.tar.gz",
+            "output_uri": "${OUTPUT_URI}",
+            "log_level": "info"
+          }
+          EOF
+          gcloud storage cp /tmp/manifest.json "${MANIFEST_URI}"
+
+          # 5. Execute Cloud Run Job and wait for completion
+          gcloud run jobs execute "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --wait \
+            --update-env-vars="MANIFEST_URI=${MANIFEST_URI},OUTPUT_URI=${OUTPUT_URI},CODEMENDER_BUILD_COMMAND=${BUILD_COMMAND},CODEMENDER_SANDBOX_ENABLED=false"
+
+      # 5. Download artifacts from GCS (runner.log, receipt.json, and finding.sarif or fix.patch)
+      - name: Download Cloud Run Job Outputs
+        if: always() && steps.execute-cmd.outputs.output_uri != ''
+        run: |
+          OUTPUT_URI="${{ steps.execute-cmd.outputs.output_uri }}"
+          CMD_TYPE="${{ steps.execute-cmd.outputs.cmd_type }}"
+
+          gcloud storage cp "${OUTPUT_URI}/runner.log" ./runner.log || echo "No runner.log found" > ./runner.log
+          gcloud storage cp "${OUTPUT_URI}/receipt.json" ./receipt.json || echo "{}" > ./receipt.json
+
+          if [ "$CMD_TYPE" == "verify" ]; then
+            gcloud storage cp "${OUTPUT_URI}/finding.sarif" ./verified-finding.sarif || true
+          elif [ "$CMD_TYPE" == "fix" ]; then
+            gcloud storage cp "${OUTPUT_URI}/fix.patch" ./fix.patch || true
+          fi
+
+      # 6. Apply, commit, and push fix.patch to the PR branch (Only for /fix)
+      - name: Apply and Push Patch (For Fixes)
+        id: apply-fix
+        if: steps.execute-cmd.outputs.cmd_type == 'fix'
+        run: |
+          set -euo pipefail
+          if [ ! -s ./fix.patch ]; then
+            echo "❌ fix.patch is missing or empty."
+            exit 1
+          fi
+
+          git apply ./fix.patch
+          rm -f ./runner.log ./receipt.json ./fix.patch ./verified-finding.sarif
+
+          git add .
+          git commit -m "security: apply automated patch for ${{ steps.execute-cmd.outputs.finding_id }}"
+          git push origin "${{ steps.pr-metadata.outputs.branch }}"
+
+      # 7. Post results back to the PR comment thread with collapsible Cloud Run logs
+      - name: Comment Results on Pull Request
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const cmdType = '${{ steps.execute-cmd.outputs.cmd_type }}';
+            const findingId = '${{ steps.execute-cmd.outputs.finding_id }}';
+            const logs = fs.existsSync('runner.log')
+              ? fs.readFileSync('runner.log', 'utf8').slice(-60000)
+              : 'Logs unavailable.';
+
+            let body = '';
+
+            if (cmdType === 'verify') {
+              let status = 'UNKNOWN';
+              let reason = '';
+              if (fs.existsSync('verified-finding.sarif')) {
+                const sarif = JSON.parse(fs.readFileSync('verified-finding.sarif', 'utf8'));
+                const props = sarif.runs?.[0]?.results?.[0]?.properties || {};
+                status = props.status || 'OPEN';
+                reason = props.dismiss_reason ? `\n\n**Dismiss Reason:** ${props.dismiss_reason}` : '';
+              }
+
+              body = `### 🧪 CodeMender Cloud Run Verification Results (\`${findingId}\`)
+
+            **Verification Status:** \`${status}\`${reason}
+
+            <details>
+            <summary>🔍 Click to expand Cloud Run execution logs (runner.log)</summary>
+
+            \`\`\`text
+            ${logs}
+            \`\`\`
+
+            </details>`;
+
+            } else if (cmdType === 'fix') {
+              const jobStatus = '${{ job.status }}';
+              const header = jobStatus === 'success'
+                ? `✅ **Vulnerability Remediation Completed.** Patch for \`${findingId}\` applied and pushed to branch \`${{ steps.pr-metadata.outputs.branch }}\`.`
+                : `❌ **Vulnerability Remediation Failed** for \`${findingId}\`. See Cloud Run logs below.`;
+
+              body = `### 🩹 CodeMender Cloud Run Patch Results (\`${findingId}\`)
+
+            ${header}
+
+            <details>
+            <summary>🛠️ Click to expand Cloud Run execution logs (runner.log)</summary>
+
+            \`\`\`text
+            ${logs}
+            \`\`\`
+
+            </details>`;
+            }
+
+            if (body) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }
