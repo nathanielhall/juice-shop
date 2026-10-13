@@ -94,8 +94,20 @@ jobs:
           echo "finding_id=${FINDING_ID}" >> "$GITHUB_OUTPUT"
           echo "output_uri=${OUTPUT_URI}" >> "$GITHUB_OUTPUT"
 
-          # 1. Package current PR branch state and upload to GCS
-          tar -czf /tmp/code.tar.gz .
+          # Ignore temporary runner files in Git so they are never committed
+          mkdir -p .git/info
+          cat << 'EOF' >> .git/info/exclude
+          gha-creds-*.json
+          runner.log
+          receipt.json
+          fix.patch
+          verified-finding.sarif
+          .cm_project/
+          .exploit/
+          EOF
+
+          # 1. Package current PR branch state (excluding gha-creds-*.json) and upload to GCS
+          tar --exclude='./gha-creds-*.json' -czf /tmp/code.tar.gz .
           gcloud storage cp /tmp/code.tar.gz "${TARGET_GCS_PREFIX}/shared/code.tar.gz"
 
           # 2. Download findings.json from commit path (or fallback to branch 'latest' path)
@@ -172,7 +184,7 @@ jobs:
             gcloud storage cp "${OUTPUT_URI}/fix.patch" ./fix.patch || true
           fi
 
-      # 6. Apply, commit, and push fix.patch to the PR branch (Only for /fix)
+
       - name: Apply and Push Patch (For Fixes)
         id: apply-fix
         if: steps.execute-cmd.outputs.cmd_type == 'fix'
@@ -184,7 +196,7 @@ jobs:
           fi
 
           git apply ./fix.patch
-          rm -f ./runner.log ./receipt.json ./fix.patch ./verified-finding.sarif
+          rm -f ./runner.log ./receipt.json ./fix.patch ./verified-finding.sarif ./gha-creds-*.json
 
           git add .
           git commit -m "security: apply automated patch for ${{ steps.execute-cmd.outputs.finding_id }}"
