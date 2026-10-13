@@ -53,7 +53,7 @@ jobs:
           MANIFEST_URI="${TARGET_GCS_PREFIX}/find-diff/manifest.json"
 
           # 1. Package repository (including .git history for diff base resolution)
-          tar -czf /tmp/code.tar.gz .
+          tar --exclude='./gha-creds-*.json' -czf /tmp/code.tar.gz .
           gcloud storage cp /tmp/code.tar.gz "${TARGET_GCS_PREFIX}/shared/code.tar.gz"
           gcloud storage cp /tmp/code.tar.gz "${BRANCH_LATEST_PREFIX}/shared/code.tar.gz"
 
@@ -117,6 +117,11 @@ jobs:
             (.value.locations[0].physicalLocation.region.startLine // 0 | tostring) as $line |
             "| `\($idx)` | `\($fid)` | `\($rule)` | `\($file):\($line)` | `/verify \($fid)` <br> `/fix \($fid)` |"
           ' /tmp/findings.json >> codemender_summary.md
+
+      - name: Clean Up Temporary Workspace Files
+        if: always()
+        run: |
+          rm -f gha-creds-*.json
 
       - name: Create Tracking Pull Request
         uses: peter-evans/create-pull-request@v6
