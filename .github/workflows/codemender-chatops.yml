@@ -21,7 +21,7 @@ jobs:
     # Trigger only if comment starts with /verify or /fix on an active Pull Request
     if: >
       github.event.issue.pull_request &&
-      (startsWith(github.event.comment.body, '/verify ') || startsWith(github.event.comment.body, '/fix '))
+      (startsWith(github.event.comment.body, '/verify ') || startsWith(github.event.comment.body, '/fix ') || startsWith(github.event.comment.body, '/find-diff'))
     runs-on: ubuntu-22.04
 
     steps:
@@ -75,6 +75,8 @@ jobs:
             CMD_TYPE="verify"
           elif [ "$COMMAND" == "/fix" ]; then
             CMD_TYPE="fix"
+          elif [ "$COMMAND" == "/find-diff" ]; then
+            CMD_TYPE="find-diff"
           else
             echo "Unsupported command: $COMMAND"
             exit 1
