@@ -18,10 +18,12 @@ env:
 
 jobs:
   chatops-remediation:
-    # Trigger only if comment starts with /verify or /fix on an active Pull Request
+    # Trigger only if comment starts with /find-diff, /verify, or /fix on an active Pull Request
     if: >
       github.event.issue.pull_request &&
-      (startsWith(github.event.comment.body, '/verify ') || startsWith(github.event.comment.body, '/fix ') || startsWith(github.event.comment.body, '/find-diff'))
+      (startsWith(github.event.comment.body, '/find-diff') ||
+       startsWith(github.event.comment.body, '/verify ') ||
+       startsWith(github.event.comment.body, '/fix '))
     runs-on: ubuntu-22.04
 
     steps:
@@ -36,13 +38,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_INFO=$(gh pr view ${{ github.event.issue.number }} --json headRefName)
+          PR_INFO=$(gh pr view ${{ github.event.issue.number }} --json headRefName,baseRefName)
           BRANCH=$(echo "$PR_INFO" | jq -r '.headRefName')
+          BASE_BRANCH=$(echo "$PR_INFO" | jq -r '.baseRefName')
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Switch to PR Branch
         run: |
-          git fetch origin "${{ steps.pr-metadata.outputs.branch }}"
+          git fetch origin "${{ steps.pr-metadata.outputs.branch }}" "${{ steps.pr-metadata.outputs.base_branch }}"
           git checkout "${{ steps.pr-metadata.outputs.branch }}"
 
       # 2. Authenticate to Google Cloud
@@ -61,24 +65,34 @@ jobs:
           git config --global user.name "CodeMender ChatOps Bot"
           git config --global user.email "codemender-bot@google.com"
 
-      # 4. Stage single-finding SARIF & manifest.json to GCS and trigger Cloud Run Job
+      # 4. Stage inputs & manifest.json to GCS and trigger Cloud Run Job
       - name: Stage ChatOps Inputs & Execute Cloud Run Job
         id: execute-cmd
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           set -euo pipefail
-          COMMAND=$(echo "$COMMENT_BODY" | awk '{print $1}')
-          FINDING_ID=$(echo "$COMMENT_BODY" | awk '{print $2}')
+          CLEAN_BODY=$(echo "$COMMENT_BODY" | tr -d '\r')
+          COMMAND=$(echo "$CLEAN_BODY" | awk '{print $1}')
+          ARG2=$(echo "$CLEAN_BODY" | awk '{print $2}')
 
-          if [ "$COMMAND" == "/verify" ]; then
+          if [ "$COMMAND" == "/find-diff" ]; then
+            CMD_TYPE="find-diff"
+            FINDING_ID=""
+            DIFF_BASE="${ARG2:-origin/${{ steps.pr-metadata.outputs.base_branch }}}"
+          elif [ "$COMMAND" == "/verify" ]; then
             CMD_TYPE="verify"
+            FINDING_ID="$ARG2"
           elif [ "$COMMAND" == "/fix" ]; then
             CMD_TYPE="fix"
-          elif [ "$COMMAND" == "/find-diff" ]; then
-            CMD_TYPE="find-diff"
+            FINDING_ID="$ARG2"
           else
             echo "Unsupported command: $COMMAND"
+            exit 1
+          fi
+
+          if [ "$CMD_TYPE" != "find-diff" ] && [ -z "$FINDING_ID" ]; then
+            echo "❌ Error: Command '$COMMAND' requires a finding ID."
             exit 1
           fi
 
@@ -87,14 +101,21 @@ jobs:
 
           TARGET_GCS_PREFIX="${TRANSIT_BUCKET}/${GITHUB_REPOSITORY}/branches/${BRANCH}/${COMMIT_SHA}"
           BRANCH_LATEST_PREFIX="${TRANSIT_BUCKET}/${GITHUB_REPOSITORY}/branches/${BRANCH}/latest"
-          TASK_PREFIX="${TARGET_GCS_PREFIX}/${CMD_TYPE}/${FINDING_ID}"
+
+          if [ "$CMD_TYPE" == "find-diff" ]; then
+            TASK_PREFIX="${TARGET_GCS_PREFIX}/find-diff"
+          else
+            TASK_PREFIX="${TARGET_GCS_PREFIX}/${CMD_TYPE}/${FINDING_ID}"
+          fi
           OUTPUT_URI="${TASK_PREFIX}/output"
           MANIFEST_URI="${TASK_PREFIX}/manifest.json"
           SINGLE_FINDING_URI="${TASK_PREFIX}/inputs/finding.sarif"
 
           echo "cmd_type=${CMD_TYPE}" >> "$GITHUB_OUTPUT"
           echo "finding_id=${FINDING_ID}" >> "$GITHUB_OUTPUT"
+          echo "diff_base=${DIFF_BASE:-}" >> "$GITHUB_OUTPUT"
           echo "output_uri=${OUTPUT_URI}" >> "$GITHUB_OUTPUT"
+          echo "branch_latest_prefix=${BRANCH_LATEST_PREFIX}" >> "$GITHUB_OUTPUT"
 
           # Ignore temporary runner files in Git so they are never committed
           mkdir -p .git/info
@@ -104,6 +125,8 @@ jobs:
           receipt.json
           fix.patch
           verified-finding.sarif
+          findings.json
+          report.md
           .cm_project/
           .exploit/
           EOF
@@ -112,45 +135,58 @@ jobs:
           tar --exclude='./gha-creds-*.json' -czf /tmp/code.tar.gz .
           gcloud storage cp /tmp/code.tar.gz "${TARGET_GCS_PREFIX}/shared/code.tar.gz"
 
-          # 2. Download findings.json from commit path (or fallback to branch 'latest' path)
-          if ! gcloud storage cp "${TARGET_GCS_PREFIX}/find-diff/output/findings.json" /tmp/findings.json 2>/dev/null; then
-            echo "Commit-specific findings.json not found; falling back to branch latest..."
-            gcloud storage cp "${BRANCH_LATEST_PREFIX}/find-diff/output/findings.json" /tmp/findings.json
-          fi
+          if [ "$CMD_TYPE" == "find-diff" ]; then
+            # Write and upload manifest.json for find-diff
+            cat <<EOF > /tmp/manifest.json
+          {
+            "command": "find-diff",
+            "diff_base": "${DIFF_BASE}",
+            "payload_uri": "${TARGET_GCS_PREFIX}/shared/code.tar.gz",
+            "output_uri": "${OUTPUT_URI}",
+            "log_level": "info"
+          }
+          EOF
+            gcloud storage cp /tmp/manifest.json "${MANIFEST_URI}"
+          else
+            # 2. Download findings.json from commit path (or fallback to branch 'latest' path)
+            if ! gcloud storage cp "${TARGET_GCS_PREFIX}/find-diff/output/findings.json" /tmp/findings.json 2>/dev/null; then
+              echo "Commit-specific findings.json not found; falling back to branch latest..."
+              gcloud storage cp "${BRANCH_LATEST_PREFIX}/find-diff/output/findings.json" /tmp/findings.json
+            fi
 
-          # 3. Extract the single finding matching FINDING_ID (by 8-char ID in codemender_summary.md, properties, ruleId, or 0-based index)
-          RESOLVED_IDX=""
-          if [ -f ./codemender_summary.md ]; then
-            RESOLVED_IDX=$(grep -E '^\| `[0-9a-f]{8}` \|' ./codemender_summary.md | awk -F'`' -v fid="$FINDING_ID" '$2 == fid {print NR-1; exit}' || true)
-          fi
+            # 3. Extract the single finding matching FINDING_ID (by 8-char ID in codemender_summary.md, properties, ruleId, or 0-based index)
+            RESOLVED_IDX=""
+            if [ -f ./codemender_summary.md ]; then
+              RESOLVED_IDX=$(grep -E '^\| `[0-9a-f]{8}` \|' ./codemender_summary.md | awk -F'`' -v fid="$FINDING_ID" '$2 == fid {print NR-1; exit}' || true)
+            fi
 
-          jq --arg fid "$FINDING_ID" --arg ridx "$RESOLVED_IDX" '
-            (.runs[0].results // []) as $all |
-            .runs[0].results = (
-              [
-                $all | to_entries[] |
-                select(
-                  (.key | tostring) == $fid or
-                  (.key | tostring) == $ridx or
-                  .value.properties.finding_id == $fid or
-                  .value.properties.id == $fid or
-                  .value.ruleId == $fid
-                ) | .value
-              ][0:1]
-            )
-          ' /tmp/findings.json > /tmp/single-finding.sarif
+            jq --arg fid "$FINDING_ID" --arg ridx "$RESOLVED_IDX" '
+              (.runs[0].results // []) as $all |
+              .runs[0].results = (
+                [
+                  $all | to_entries[] |
+                  select(
+                    (.key | tostring) == $fid or
+                    (.key | tostring) == $ridx or
+                    .value.properties.finding_id == $fid or
+                    .value.properties.id == $fid or
+                    .value.ruleId == $fid
+                  ) | .value
+                ][0:1]
+              )
+            ' /tmp/findings.json > /tmp/single-finding.sarif
 
-          FINAL_COUNT=$(jq -r '.runs[0].results | length' /tmp/single-finding.sarif 2>/dev/null || echo "0")
-          FINAL_COUNT="${FINAL_COUNT:-0}"
-          if [ ! -s /tmp/single-finding.sarif ] || [ "$FINAL_COUNT" != "1" ]; then
-            echo "❌ Error: Could not isolate a single finding for ID '${FINDING_ID}' (found ${FINAL_COUNT})."
-            exit 1
-          fi
+            FINAL_COUNT=$(jq -r '.runs[0].results | length' /tmp/single-finding.sarif 2>/dev/null || echo "0")
+            FINAL_COUNT="${FINAL_COUNT:-0}"
+            if [ ! -s /tmp/single-finding.sarif ] || [ "$FINAL_COUNT" != "1" ]; then
+              echo "❌ Error: Could not isolate a single finding for ID '${FINDING_ID}' (found ${FINAL_COUNT})."
+              exit 1
+            fi
 
-          gcloud storage cp /tmp/single-finding.sarif "${SINGLE_FINDING_URI}"
+            gcloud storage cp /tmp/single-finding.sarif "${SINGLE_FINDING_URI}"
 
-          # 4. Write and upload manifest.json
-          cat <<EOF > /tmp/manifest.json
+            # 4. Write and upload manifest.json for verify / fix
+            cat <<EOF > /tmp/manifest.json
           {
             "command": "${CMD_TYPE}",
             "finding_id": "${FINDING_ID}",
@@ -160,7 +196,8 @@ jobs:
             "log_level": "info"
           }
           EOF
-          gcloud storage cp /tmp/manifest.json "${MANIFEST_URI}"
+            gcloud storage cp /tmp/manifest.json "${MANIFEST_URI}"
+          fi
 
           # 5. Execute Cloud Run Job and wait for completion
           gcloud run jobs execute "${JOB_NAME}" \
@@ -169,22 +206,28 @@ jobs:
             --wait \
             --update-env-vars="MANIFEST_URI=${MANIFEST_URI},OUTPUT_URI=${OUTPUT_URI},CODEMENDER_BUILD_COMMAND=${BUILD_COMMAND},CODEMENDER_SANDBOX_ENABLED=false"
 
-      # 5. Download artifacts from GCS (runner.log, receipt.json, and finding.sarif or fix.patch)
+      # 5. Download artifacts from GCS (runner.log, receipt.json, and command-specific outputs)
       - name: Download Cloud Run Job Outputs
         if: always() && steps.execute-cmd.outputs.output_uri != ''
         run: |
           OUTPUT_URI="${{ steps.execute-cmd.outputs.output_uri }}"
+          BRANCH_LATEST_PREFIX="${{ steps.execute-cmd.outputs.branch_latest_prefix }}"
           CMD_TYPE="${{ steps.execute-cmd.outputs.cmd_type }}"
 
           gcloud storage cp "${OUTPUT_URI}/runner.log" ./runner.log || echo "No runner.log found" > ./runner.log
           gcloud storage cp "${OUTPUT_URI}/receipt.json" ./receipt.json || echo "{}" > ./receipt.json
 
-          if [ "$CMD_TYPE" == "verify" ]; then
+          if [ "$CMD_TYPE" == "find-diff" ]; then
+            gcloud storage cp "${OUTPUT_URI}/findings.json" ./findings.json || gcloud storage cp "${OUTPUT_URI}/report.sarif" ./findings.json || true
+            gcloud storage cp "${OUTPUT_URI}/report.md" ./report.md || true
+            if [ -s ./findings.json ]; then
+              gcloud storage cp ./findings.json "${BRANCH_LATEST_PREFIX}/find-diff/output/findings.json" || true
+            fi
+          elif [ "$CMD_TYPE" == "verify" ]; then
             gcloud storage cp "${OUTPUT_URI}/finding.sarif" ./verified-finding.sarif || true
           elif [ "$CMD_TYPE" == "fix" ]; then
             gcloud storage cp "${OUTPUT_URI}/fix.patch" ./fix.patch || true
           fi
-
 
       - name: Apply and Push Patch (For Fixes)
         id: apply-fix
@@ -197,7 +240,7 @@ jobs:
           fi
 
           git apply ./fix.patch
-          rm -f ./runner.log ./receipt.json ./fix.patch ./verified-finding.sarif ./gha-creds-*.json
+          rm -f ./runner.log ./receipt.json ./fix.patch ./verified-finding.sarif ./findings.json ./report.md ./gha-creds-*.json
 
           git add .
           git commit -m "security: apply automated patch for ${{ steps.execute-cmd.outputs.finding_id }}"
@@ -212,13 +255,64 @@ jobs:
             const fs = require('fs');
             const cmdType = '${{ steps.execute-cmd.outputs.cmd_type }}';
             const findingId = '${{ steps.execute-cmd.outputs.finding_id }}';
+            const diffBase = '${{ steps.execute-cmd.outputs.diff_base }}';
             const logs = fs.existsSync('runner.log')
               ? fs.readFileSync('runner.log', 'utf8').slice(-60000)
               : 'Logs unavailable.';
 
             let body = '';
 
-            if (cmdType === 'verify') {
+            if (cmdType === 'find-diff') {
+              const jobStatus = '${{ job.status }}';
+              let summarySection = '';
+
+              if (fs.existsSync('findings.json')) {
+                try {
+                  const sarif = JSON.parse(fs.readFileSync('findings.json', 'utf8'));
+                  const results = sarif.runs?.[0]?.results || [];
+                  if (results.length === 0) {
+                    summarySection = `✅ **No vulnerabilities found** against base \`${diffBase}\`.`;
+                  } else {
+                    const rows = results.map((r, idx) => {
+                      const id = r.properties?.finding_id || r.properties?.id || String(idx);
+                      const rule = r.ruleId || 'unknown';
+                      const level = r.level || 'warning';
+                      const loc = r.locations?.[0]?.physicalLocation;
+                      const uri = loc?.artifactLocation?.uri || 'unknown';
+                      const line = loc?.region?.startLine ? `:${loc.region.startLine}` : '';
+                      const msg = (r.message?.text || '').split('\n')[0].replace(/\|/g, '\\|').slice(0, 100);
+                      return `| \`${id}\` | \`${rule}\` | \`${level}\` | \`${uri}${line}\` | ${msg} |`;
+                    }).join('\n');
+
+                    summarySection = `⚠️ **Found ${results.length} finding(s)** against base \`${diffBase}\`.\n\n` +
+                      `| ID | Rule | Level | Location | Summary |\n` +
+                      `| :--- | :--- | :--- | :--- | :--- |\n` +
+                      `${rows}\n\n` +
+                      `💡 *Comment \`/verify <ID>\` or \`/fix <ID>\` to validate or remediate a finding.*`;
+                  }
+                } catch (err) {
+                  summarySection = `⚠️ Could not parse \`findings.json\`: ${err.message}`;
+                }
+              } else if (jobStatus !== 'success') {
+                summarySection = `❌ **Differential Scan Failed** against base \`${diffBase}\`. See Cloud Run logs below.`;
+              } else {
+                summarySection = `⚠️ Scan finished, but no \`findings.json\` artifact was found.`;
+              }
+
+              body = `### 🔎 CodeMender Cloud Run Diff Scan Results
+
+            ${summarySection}
+
+            <details>
+            <summary>🔍 Click to expand Cloud Run execution logs (runner.log)</summary>
+
+            \`\`\`text
+            ${logs}
+            \`\`\`
+
+            </details>`;
+
+            } else if (cmdType === 'verify') {
               let status = 'UNKNOWN';
               let reason = '';
               if (fs.existsSync('verified-finding.sarif')) {
