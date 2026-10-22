@@ -11,6 +11,8 @@ jobs:
       contents: write
       pull-requests: write
       id-token: write
+      security-events: write # REQUIRED: Allows uploading SARIF to GitHub Code Scanning
+      actions: read          # RECOMMENDED: Required by upload-sarif for private/internal repos
 
     steps:
       - name: Checkout Repository
@@ -80,6 +82,7 @@ jobs:
 
           # Scan Phase (Cost-Optimized Model)
           echo "🔍 Scanning codebase with Gemini 3.5 Flash..."
+          # Use pipefail or capture status if cm find exits non-zero on findings
           cm find . --model gemini-3.5-flash -y 2>&1 | tee scan_output.log
 
           # Query Findings
@@ -96,11 +99,12 @@ jobs:
           echo "NO_FINDINGS=false" >> "$GITHUB_ENV"
           echo "✅ Remediation pipeline completed successfully!"
 
-      # 5. Generate and Publish the Report
+      # 5. Generate and Publish the Report (Markdown Summary + SARIF File)
       - name: Generate Security Report
         run: |
-          echo "📊 Generating Markdown report..."
+          echo "📊 Generating Markdown and SARIF reports..."
           cm report --format md > codemender_summary.md
+          cm report --format sarif > codemender.sarif
 
           # Extract the execution and token usage line from the scan log
           TOKEN_SUMMARY=$(grep "Tokens:" scan_output.log | tail -n 1 || true)
@@ -115,13 +119,21 @@ jobs:
           echo "# CodeMender Scan Results" >> $GITHUB_STEP_SUMMARY
           cat codemender_summary.md >> $GITHUB_STEP_SUMMARY
 
-      # 5. Cleanup Sensitive Binaries (Best Practice)
+      # 6. Upload SARIF to GitHub Code Scanning
+      - name: Upload results to GitHub Code Scanning
+        if: ${{ !cancelled() && hashFiles('codemender.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: codemender.sarif
+          category: codemender
+
+      # 7. Cleanup Sensitive Binaries (Best Practice)
       - name: Cleanup
         if: always()
         run: |
           rm -f cm-linux-amd64.zip
           rm -f cm
+          rm -f codemender.sarif
           rm -rf .cm_project
           rm -rf .exploit/
-          rm -f gha-creds-*.json        
-
+          rm -f gha-creds-*.json
