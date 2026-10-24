@@ -1,4 +1,4 @@
-name: CodeMender Export Alerts
+name: CodeMender Scan (export GitHub Code Scanning)
 on:
   # Trigger manually via the GitHub Actions UI
   workflow_dispatch:
@@ -89,11 +89,9 @@ jobs:
               config['scan']['extensions'][list_key] = []
     
           # 3. Add new extensions
-          updated = False
           for ext in sorted(extensions):
               if ext not in config['scan']['extensions'][list_key]:
                   config['scan']['extensions'][list_key].append(ext)
-                  updated = True
     
           # Disable interactive prompts for CI/CD execution
           config.setdefault('tools', {})
@@ -115,7 +113,10 @@ jobs:
         run: |
           echo "📊 Generating Markdown and JSON reports..."
           cm report --format md > codemender_summary.md
-          cm report --format json > codemender_report.json
+
+          # Export open CRITICAL and HIGH findings so GitHub Security Overview shows multi-severity breakdown
+          # (Change to --severity CRITICAL if you only want Critical findings)
+          cm report --severity CRITICAL,HIGH --status OPEN --format json > codemender_report.json
 
           # Extract the execution and token usage line from the scan log
           TOKEN_SUMMARY=$(grep "Tokens:" scan_output.log | tail -n 1 || true)
@@ -167,7 +168,7 @@ jobs:
               "INFO": "1.0"
           }
 
-          # Map CodeMender severity to precision
+          # 3. Map CodeMender severity to precision
           severity_to_precision = {
               "CRITICAL": "very-high",
               "HIGH": "high",
@@ -186,7 +187,7 @@ jobs:
               if finding_status in ("FIXED", "DISMISSED", "CLOSED"):
                   continue
 
-              # Create a stable, clean rule ID (include severity so rules with same title dont collide on score)
+              # Create a stable, clean rule ID (include severity so rules with same title do not collide on score)
               slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", title).strip("-")[:80]
               rule_id = f"CM-{raw_severity}-{slug}" if slug else f"CM-{raw_severity}-Finding"
 
@@ -289,18 +290,24 @@ jobs:
               json.dump(sarif_output, f, indent=2)
           print(f"Generated output.sarif with {len(rules)} rules and {len(results)} security results.")
           '
+
       # Upload the SARIF payload directly to the target repository using the GitHub CLI
       - name: Upload SARIF directly via GitHub CLI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 1. Write GZIP Base64 directly to a file instead of a bash variable
+          # 1. Compress the SARIF file into GZIP Base64 file (avoids bash argument length limits)
           gzip -c "output.sarif" | base64 -w 0 > sarif.b64
           
+          # 2. Extract the exact commit hash of the checked-out codebase
           COMMIT_SHA=$(git rev-parse HEAD)
+          
+          # 3. Safely resolve the active branch reference name
           BRANCH_REF="${GITHUB_REF:-$(git symbolic-ref HEAD 2>/dev/null || echo 'refs/heads/main')}"
           
-          # 2. Use uppercase -F sarif=@sarif.b64 so gh reads the file directly!
+          echo "Uploading SARIF payload natively to ${{ github.repository }} (ref: $BRANCH_REF, sha: $COMMIT_SHA)..."
+          
+          # 4. Execute the secure POST request directly through the GH CLI engine using @file syntax
           gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
@@ -310,14 +317,14 @@ jobs:
             -f ref="$BRANCH_REF" \
             -F sarif=@sarif.b64 \
             -f tool_name="CodeMender"
-    
+
       # Cleanup Sensitive Binaries (Best Practice)
       - name: Cleanup
         if: always()
         run: |
           rm -f cm-linux-amd64.zip
           rm -f cm
-          rm -f output.sarif codemender_report.json codemender_summary.md scan_output.log
+          rm -f output.sarif sarif.b64 codemender_report.json codemender_summary.md scan_output.log
           rm -rf .cm_project
           rm -rf .exploit/
           rm -f gha-creds-*.json
