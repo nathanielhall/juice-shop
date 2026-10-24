@@ -289,24 +289,18 @@ jobs:
               json.dump(sarif_output, f, indent=2)
           print(f"Generated output.sarif with {len(rules)} rules and {len(results)} security results.")
           '
-
       # Upload the SARIF payload directly to the target repository using the GitHub CLI
       - name: Upload SARIF directly via GitHub CLI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 1. Compress the SARIF file into GZIP Base64 format as required by the API
-          SARIF_BASE64=$(gzip -c "output.sarif" | base64 -w 0)
+          # 1. Write GZIP Base64 directly to a file instead of a bash variable
+          gzip -c "output.sarif" | base64 -w 0 > sarif.b64
           
-          # 2. Extract the exact commit hash of the checked-out codebase
           COMMIT_SHA=$(git rev-parse HEAD)
-          
-          # 3. Safely resolve the active branch reference name
           BRANCH_REF="${GITHUB_REF:-$(git symbolic-ref HEAD 2>/dev/null || echo 'refs/heads/main')}"
           
-          echo "Uploading SARIF payload natively to ${{ github.repository }} (ref: $BRANCH_REF, sha: $COMMIT_SHA)..."
-          
-          # 4. Execute the secure POST request directly through the GH CLI engine
+          # 2. Use uppercase -F sarif=@sarif.b64 so gh reads the file directly!
           gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
@@ -314,9 +308,9 @@ jobs:
             "repos/${{ github.repository }}/code-scanning/sarifs" \
             -f commit_sha="$COMMIT_SHA" \
             -f ref="$BRANCH_REF" \
-            -f sarif="$SARIF_BASE64" \
+            -F sarif=@sarif.b64 \
             -f tool_name="CodeMender"
-
+    
       # Cleanup Sensitive Binaries (Best Practice)
       - name: Cleanup
         if: always()
