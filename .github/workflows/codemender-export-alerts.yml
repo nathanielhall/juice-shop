@@ -114,9 +114,8 @@ jobs:
           echo "📊 Generating Markdown and JSON reports..."
           cm report --format md > codemender_summary.md
 
-          # Export open CRITICAL and HIGH findings so GitHub Security Overview shows multi-severity breakdown
-          # (Change to --severity CRITICAL if you only want Critical findings)
-          cm report --severity CRITICAL,HIGH --status OPEN --format json > codemender_report.json
+          # Export open CRITICAL findings so GitHub Security Overview shows multi-severity breakdown
+          cm report --severity CRITICAL --format json > codemender_report.json
 
           # Extract the execution and token usage line from the scan log
           TOKEN_SUMMARY=$(grep "Tokens:" scan_output.log | tail -n 1 || true)
